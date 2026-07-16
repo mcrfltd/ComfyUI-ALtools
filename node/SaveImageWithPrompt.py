@@ -27,7 +27,8 @@ class SaveImageWithPrompt:
     RETURN_TYPES = ()
     FUNCTION = "save_images"
     OUTPUT_NODE = True
-    CATEGORY = "image"
+    # CATEGORY = "image"
+    CATEGORY = "ALTOOLS"
 
     def save_images(self, images, filename_prefix="ComfyUI", pos_prompt="", prompt=None, extra_pnginfo=None):
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(

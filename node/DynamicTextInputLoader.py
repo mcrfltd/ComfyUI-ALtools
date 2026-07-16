@@ -13,7 +13,8 @@ class DynamicTextInputLoader:
 
     RETURN_TYPES = ("STRING",)
     FUNCTION = "process_texts"
-    CATEGORY = "utils"
+    # CATEGORY = "utils"
+    CATEGORY = "ALTOOLS"
 
     def process_texts(self, text_list_json, delimiter):
         try:

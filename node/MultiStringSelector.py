@@ -15,7 +15,8 @@ class MultiStringSelector:
 
     RETURN_TYPES = ("STRING",)
     FUNCTION = "select_string"
-    CATEGORY = "utils"
+    # CATEGORY = "utils"
+    CATEGORY = "ALTOOLS"
 
     def select_string(self, active_input, **kwargs):
         # 使用 **kwargs 依據連線點名稱安全取值
