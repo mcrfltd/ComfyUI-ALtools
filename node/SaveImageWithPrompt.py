@@ -1,9 +1,28 @@
 import os
 import json
+import hashlib
+from functools import lru_cache
 import numpy as np
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 import folder_paths
+
+
+@lru_cache(maxsize=128)
+def calculate_lora_autov2(file_path):
+    """計算 LoRA 檔案的全檔 SHA256，並傳回前 10 碼（AutoV2）"""
+    if not file_path or not os.path.exists(file_path):
+        return None
+    try:
+        sha256_hash = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for byte_block in iter(lambda: f.read(65536), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()[:10].lower()
+    except Exception as e:
+        print(f"[SaveImage] 計算 SHA256 失敗 ({file_path}): {e}")
+        return None
+
 
 class SaveImageWithPrompt:
     def __init__(self):
@@ -29,90 +48,39 @@ class SaveImageWithPrompt:
     OUTPUT_NODE = True
     CATEGORY = "ALTOOLS"
 
-    def get_json_autov2_hash(self, lora_file_name):
-        """專門解析 JSON，並確認 files 中的 name 與 lora_file_name 對應才取出 AutoV2 Hash"""
+    def resolve_lora_path(self, lora_file_name):
+        """尋找 LoRA 實體檔案路徑"""
         if not lora_file_name:
             return None
-
         clean_name = str(lora_file_name).strip()
-        # 取得純檔名 (例如 "zoda_v3_anima.safetensors")
-        target_filename = os.path.basename(clean_name).lower()
-        if not target_filename.endswith(".safetensors"):
-            target_filename += ".safetensors"
-
-        # 尋找 loras/ 目錄下的檔案
-        full_lora_path = folder_paths.get_full_path("loras", clean_name)
-        if not full_lora_path and not clean_name.endswith(".safetensors"):
-            full_lora_path = folder_paths.get_full_path("loras", clean_name + ".safetensors")
-
-        if not full_lora_path:
-            return None
-
-        # 拼接同名 .json 檔案路徑
-        json_path = os.path.splitext(full_lora_path)[0] + ".json"
-
-        if os.path.exists(json_path):
-            try:
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-
-                    files = []
-                    if isinstance(data, dict):
-                        if "version" in data and isinstance(data["version"], dict):
-                            files = data["version"].get("files", [])
-                        elif "files" in data and isinstance(data["files"], list):
-                            files = data["files"]
-
-                    # 遍歷 files 陣列，確認 name 與 target_filename 對應
-                    if isinstance(files, list):
-                        for file_info in files:
-                            if isinstance(file_info, dict):
-                                file_name_in_json = str(file_info.get("name", "")).strip().lower()
-
-                                # 【關鍵點】確認 JSON 內的 name 對得上要求的 lora_file_name
-                                if file_name_in_json == target_filename:
-                                    autov2 = file_info.get("hashes", {}).get("AutoV2", "")
-                                    if autov2:
-                                        return autov2[:10].lower()
-
-                        # 若有多個檔案但沒完全匹配成功，退回取第一個有 AutoV2 的檔案
-                        for file_info in files:
-                            if isinstance(file_info, dict):
-                                autov2 = file_info.get("hashes", {}).get("AutoV2", "")
-                                if autov2:
-                                    return autov2[:10].lower()
-
-            except Exception as e:
-                print(f"[SaveImage] 讀取 LoRA JSON 失敗 ({json_path}): {e}")
-
-        return None
+        full_path = folder_paths.get_full_path("loras", clean_name)
+        if not full_path and not clean_name.endswith(".safetensors"):
+            full_path = folder_paths.get_full_path("loras", clean_name + ".safetensors")
+        return full_path
 
     def save_images(self, images, filename_prefix="ComfyUI", pos_prompt="", prompt=None, extra_pnginfo=None):
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
             filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0]
         )
-        detected_loras = []
+
         lora_hashes_dict = {}
         model_name = ""
+        fallback_pos_prompt = ""
 
-        # =========================================================
-        # 1. 獨立的 LoRA 與 Model 偵測邏輯（完全不受 pos_prompt 影響）
-        # =========================================================
         if prompt is not None:
             for node_id, node_data in prompt.items():
                 class_type = str(node_data.get("class_type", ""))
                 inputs = node_data.get("inputs", {})
 
-                # 抓取 Checkpoint 底模名稱
+                # 1. 抓取 Checkpoint 底模名稱
                 if "CheckpointLoader" in class_type or "ckpt_name" in inputs:
                     ckpt_path = inputs.get("ckpt_name", "")
                     if ckpt_path:
                         model_name = os.path.splitext(os.path.basename(str(ckpt_path)))[0]
 
-                # 專門處理 AnimaMultiLoraLoader 節點
+                # 2. 處理 AnimaMultiLoraLoader 節點
                 if class_type == "AnimaMultiLoraLoader":
                     lora_data = inputs.get("lora_list_json", "")
-
                     lora_list = []
                     if isinstance(lora_data, str) and lora_data.strip():
                         try:
@@ -122,7 +90,7 @@ class SaveImageWithPrompt:
                             if isinstance(parsed, list):
                                 lora_list = parsed
                         except Exception as e:
-                            print(f"[SaveImage] JSON 解析失敗: {e}")
+                            print(f"[SaveImage] AnimaMultiLoraLoader JSON 解析失敗: {e}")
                     elif isinstance(lora_data, list):
                         lora_list = lora_data
 
@@ -135,21 +103,42 @@ class SaveImageWithPrompt:
 
                         if isinstance(item, dict) and item.get("enabled", False):
                             raw_name = item.get("name", "")
-                            strength = item.get("strength_model", item.get("strength", 1.0))
+                            if raw_name:
+                                lora_path = self.resolve_lora_path(raw_name)
+                                hash_val = calculate_lora_autov2(lora_path)
+                                if hash_val:
+                                    clean_name = os.path.splitext(os.path.basename(raw_name))[0]
+                                    lora_hashes_dict[clean_name] = hash_val
 
-                            if not raw_name:
-                                continue
+                # 3. 處理 Power Lora Loader (rgthree) 節點
+                if class_type == "Power Lora Loader (rgthree)" or "PowerLoraLoader" in class_type:
+                    print(inputs)
+                    for key, val in inputs.items():
+                        if isinstance(val, dict) and val.get("on", False):
+                            raw_name = val.get("lora", "")
+                            if raw_name:
+                                lora_path = self.resolve_lora_path(raw_name)
+                                print(raw_name, lora_path)
+                                hash_val = calculate_lora_autov2(lora_path)
+                                if hash_val:
+                                    clean_name = os.path.splitext(os.path.basename(raw_name))[0]
+                                    lora_hashes_dict[clean_name] = hash_val
 
-                            # 尋找 JSON 中的 AutoV2 Hash
-                            hash_val = self.get_json_autov2_hash(raw_name)
+                # 4. 若 pos_prompt 為空，從 AnimaPromptPlus 擷取標籤作為備用
+                if not pos_prompt.strip() and class_type == "AnimaPromptPlus":
+                    tags_keys = ["quality_prompt", "artist_tags", "character_tags", "clothing_tags", "pose_tags", "background_tags", "extra_prompt"]
+                    extracted_tags = []
+                    for key in tags_keys:
+                        val = inputs.get(key, "")
+                        if isinstance(val, str) and val.strip():
+                            extracted_tags.append(val.strip().strip(","))
 
-                            # 只要成功找到 AutoV2 Hash 就強制寫入
-                            if hash_val:
-                                clean_name = os.path.splitext(os.path.basename(raw_name))[0]
-                                lora_hashes_dict[clean_name] = hash_val
+                    if extracted_tags:
+                        sep = inputs.get("separator", ", ")
+                        fallback_pos_prompt = sep.join(extracted_tags)
 
-        # 組合 LoRA 標籤字串
-        lora_str = " ".join(detected_loras) if detected_loras else ""
+        # 決定最終使用的 Positive Prompt
+        final_pos_prompt = pos_prompt.strip() if pos_prompt.strip() else fallback_pos_prompt
 
         results = list()
         for image in images:
@@ -195,14 +184,7 @@ class SaveImageWithPrompt:
                             elif "value" in inputs and isinstance(inputs["value"], str):
                                 neg_prompt = inputs["value"]
 
-            # =========================================================
-            # 2. 拼接 Prompt (不管原始 pos_prompt 有沒有值，都強制寫入 LoRA)
-            # =========================================================
-            clean_pos = pos_prompt.strip().replace("\n", ", ") if pos_prompt else ""
-
-            if lora_str:
-                clean_pos = f"{clean_pos}, {lora_str}" if clean_pos else lora_str
-
+            clean_pos = final_pos_prompt.replace("\n", ", ")
             clean_neg = neg_prompt.strip().replace("\n", ", ") if neg_prompt else ""
 
             param_parts = [
@@ -230,7 +212,7 @@ class SaveImageWithPrompt:
             )
 
             metadata.add_text("parameters", civitai_format_prompt)
-            metadata.add_text("positive_prompt", pos_prompt)
+            metadata.add_text("positive_prompt", final_pos_prompt)
 
             if prompt is not None:
                 metadata.add_text("prompt", json.dumps(prompt))
