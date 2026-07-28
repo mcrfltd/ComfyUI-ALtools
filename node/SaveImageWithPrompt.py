@@ -91,15 +91,18 @@ class SaveImageWithPrompt:
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
             filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0]
         )
-
         detected_loras = []
         lora_hashes_dict = {}
         model_name = ""
 
+        # =========================================================
+        # 1. 獨立的 LoRA 與 Model 偵測邏輯（完全不受 pos_prompt 影響）
+        # =========================================================
         if prompt is not None:
             for node_id, node_data in prompt.items():
                 class_type = str(node_data.get("class_type", ""))
                 inputs = node_data.get("inputs", {})
+
                 # 抓取 Checkpoint 底模名稱
                 if "CheckpointLoader" in class_type or "ckpt_name" in inputs:
                     ckpt_path = inputs.get("ckpt_name", "")
@@ -109,12 +112,11 @@ class SaveImageWithPrompt:
                 # 專門處理 AnimaMultiLoraLoader 節點
                 if class_type == "AnimaMultiLoraLoader":
                     lora_data = inputs.get("lora_list_json", "")
-                    # 1. 容錯解析：將資料統一轉為 list 結構
+
                     lora_list = []
                     if isinstance(lora_data, str) and lora_data.strip():
                         try:
                             parsed = json.loads(lora_data)
-                            # 處理雙重序列化 (String 裡面包 String) 的極端情況
                             if isinstance(parsed, str):
                                 parsed = json.loads(parsed)
                             if isinstance(parsed, list):
@@ -123,14 +125,14 @@ class SaveImageWithPrompt:
                             print(f"[SaveImage] JSON 解析失敗: {e}")
                     elif isinstance(lora_data, list):
                         lora_list = lora_data
-                    # 2. 迭代 list 處理
+
                     for item in lora_list:
-                        # 處理項目可能是 dict 或被二次序列化的 JSON string
                         if isinstance(item, str):
                             try:
                                 item = json.loads(item)
                             except Exception:
                                 continue
+
                         if isinstance(item, dict) and item.get("enabled", False):
                             raw_name = item.get("name", "")
                             strength = item.get("strength_model", item.get("strength", 1.0))
@@ -138,17 +140,16 @@ class SaveImageWithPrompt:
                             if not raw_name:
                                 continue
 
-                            # 到 loras/ 下搜尋 .json 檔中的 AutoV2 Hash
+                            # 尋找 JSON 中的 AutoV2 Hash
                             hash_val = self.get_json_autov2_hash(raw_name)
 
-                            # 只有成功拿到 Hash 的 LoRA 才加入輸出結果
+                            # 只要成功找到 AutoV2 Hash 就強制寫入
                             if hash_val:
                                 clean_name = os.path.splitext(os.path.basename(raw_name))[0]
-                                lora_tag = f"<lora:{clean_name}:{strength}>"
-
-                                if lora_tag not in detected_loras:
-                                    detected_loras.append(lora_tag)
                                 lora_hashes_dict[clean_name] = hash_val
+
+        # 組合 LoRA 標籤字串
+        lora_str = " ".join(detected_loras) if detected_loras else ""
 
         results = list()
         for image in images:
@@ -194,12 +195,15 @@ class SaveImageWithPrompt:
                             elif "value" in inputs and isinstance(inputs["value"], str):
                                 neg_prompt = inputs["value"]
 
-            clean_pos = pos_prompt.strip().replace("\n", ", ")
-            clean_neg = neg_prompt.strip().replace("\n", ", ") if neg_prompt else ""
+            # =========================================================
+            # 2. 拼接 Prompt (不管原始 pos_prompt 有沒有值，都強制寫入 LoRA)
+            # =========================================================
+            clean_pos = pos_prompt.strip().replace("\n", ", ") if pos_prompt else ""
 
-            if detected_loras:
-                lora_str = " ".join(detected_loras)
+            if lora_str:
                 clean_pos = f"{clean_pos}, {lora_str}" if clean_pos else lora_str
+
+            clean_neg = neg_prompt.strip().replace("\n", ", ") if neg_prompt else ""
 
             param_parts = [
                 f"Steps: {steps}",
