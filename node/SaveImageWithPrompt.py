@@ -38,7 +38,8 @@ class SaveImageWithPrompt:
             "required": {
                 "images": ("IMAGE",),
                 "filename_prefix": ("STRING", {"default": "ComfyUI"}),
-                "wipe_workflow": ("BOOLEAN", {"default": False}),  # 新增 toggle
+                "wipe_workflow": ("BOOLEAN", {"default": False}),
+                "wipe_lora": ("BOOLEAN", {"default": False}),  # 新增 wipe_lora toggle
             },
             "optional": {
                 "pos_prompt": ("STRING", {"default": ""}),
@@ -68,6 +69,7 @@ class SaveImageWithPrompt:
         images,
         filename_prefix="ComfyUI",
         wipe_workflow=False,
+        wipe_lora=False,
         pos_prompt="",
         prompt=None,
         extra_pnginfo=None,
@@ -99,60 +101,62 @@ class SaveImageWithPrompt:
                             os.path.basename(str(ckpt_path))
                         )[0]
 
-                # 2. 處理 AnimaMultiLoraLoader 節點
-                if class_type == "AnimaMultiLoraLoader":
-                    lora_data = inputs.get("lora_list_json", "")
-                    lora_list = []
-                    if isinstance(lora_data, str) and lora_data.strip():
-                        try:
-                            parsed = json.loads(lora_data)
-                            if isinstance(parsed, str):
-                                parsed = json.loads(parsed)
-                            if isinstance(parsed, list):
-                                lora_list = parsed
-                        except Exception as e:
-                            print(
-                                f"[SaveImage] AnimaMultiLoraLoader JSON 解析失敗: {e}"
-                            )
-                    elif isinstance(lora_data, list):
-                        lora_list = lora_data
-
-                    for item in lora_list:
-                        if isinstance(item, str):
+                # 僅在 wipe_lora 為 False 時才執行 LoRA 搜尋與 Hash 計算
+                if not wipe_lora:
+                    # 2. 處理 AnimaMultiLoraLoader 節點
+                    if class_type == "AnimaMultiLoraLoader":
+                        lora_data = inputs.get("lora_list_json", "")
+                        lora_list = []
+                        if isinstance(lora_data, str) and lora_data.strip():
                             try:
-                                item = json.loads(item)
-                            except Exception:
-                                continue
+                                parsed = json.loads(lora_data)
+                                if isinstance(parsed, str):
+                                    parsed = json.loads(parsed)
+                                if isinstance(parsed, list):
+                                    lora_list = parsed
+                            except Exception as e:
+                                print(
+                                    f"[SaveImage] AnimaMultiLoraLoader JSON 解析失敗: {e}"
+                                )
+                        elif isinstance(lora_data, list):
+                            lora_list = lora_data
 
-                        if isinstance(item, dict) and item.get(
-                            "enabled", False
-                        ):
-                            raw_name = item.get("name", "")
-                            if raw_name:
-                                lora_path = self.resolve_lora_path(raw_name)
-                                hash_val = calculate_lora_autov2(lora_path)
-                                if hash_val:
-                                    clean_name = os.path.splitext(
-                                        os.path.basename(raw_name)
-                                    )[0]
-                                    lora_hashes_dict[clean_name] = hash_val
+                        for item in lora_list:
+                            if isinstance(item, str):
+                                try:
+                                    item = json.loads(item)
+                                except Exception:
+                                    continue
 
-                # 3. 處理 Power Lora Loader (rgthree) 節點
-                if (
-                    class_type == "Power Lora Loader (rgthree)"
-                    or "PowerLoraLoader" in class_type
-                ):
-                    for key, val in inputs.items():
-                        if isinstance(val, dict) and val.get("on", False):
-                            raw_name = val.get("lora", "")
-                            if raw_name:
-                                lora_path = self.resolve_lora_path(raw_name)
-                                hash_val = calculate_lora_autov2(lora_path)
-                                if hash_val:
-                                    clean_name = os.path.splitext(
-                                        os.path.basename(raw_name)
-                                    )[0]
-                                    lora_hashes_dict[clean_name] = hash_val
+                            if isinstance(item, dict) and item.get(
+                                "enabled", False
+                            ):
+                                raw_name = item.get("name", "")
+                                if raw_name:
+                                    lora_path = self.resolve_lora_path(raw_name)
+                                    hash_val = calculate_lora_autov2(lora_path)
+                                    if hash_val:
+                                        clean_name = os.path.splitext(
+                                            os.path.basename(raw_name)
+                                        )[0]
+                                        lora_hashes_dict[clean_name] = hash_val
+
+                    # 3. 處理 Power Lora Loader (rgthree) 節點
+                    if (
+                        class_type == "Power Lora Loader (rgthree)"
+                        or "PowerLoraLoader" in class_type
+                    ):
+                        for key, val in inputs.items():
+                            if isinstance(val, dict) and val.get("on", False):
+                                raw_name = val.get("lora", "")
+                                if raw_name:
+                                    lora_path = self.resolve_lora_path(raw_name)
+                                    hash_val = calculate_lora_autov2(lora_path)
+                                    if hash_val:
+                                        clean_name = os.path.splitext(
+                                            os.path.basename(raw_name)
+                                        )[0]
+                                        lora_hashes_dict[clean_name] = hash_val
 
                 # 4. 若 pos_prompt 為空，從 AnimaPromptPlus 擷取標籤作為備用
                 if not pos_prompt.strip() and class_type == "AnimaPromptPlus":
@@ -255,7 +259,7 @@ class SaveImageWithPrompt:
             if model_name:
                 param_parts.append(f"Model: {model_name}")
 
-            if lora_hashes_dict:
+            if not wipe_lora and lora_hashes_dict:
                 hashes_str = ", ".join(
                     [f"{k}: {v}" for k, v in lora_hashes_dict.items()]
                 )
