@@ -15,7 +15,7 @@ class AngleSelector:
                     "view from side",
                     "from above",
                     "from below",
-                    "dutch angle"
+                    "dutch angle",
                     "none",
                 ], {"default": "view from front"}),
 
@@ -25,7 +25,7 @@ class AngleSelector:
                     "portrait",
                     "medium shot",
                     "cowboy shot",
-                    "full body shot"
+                    "full body shot",
                     "none",
                 ], {"default": "close up"}),
 
