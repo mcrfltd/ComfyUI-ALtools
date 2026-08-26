@@ -10,8 +10,8 @@ from PIL.PngImagePlugin import PngInfo
 
 
 @lru_cache(maxsize=128)
-def calculate_lora_autov2(file_path):
-    """計算 LoRA 檔案的全檔 SHA256，並傳回前 10 碼（AutoV2）"""
+def calculate_model_autov2(file_path):
+    """計算模型檔案的全檔 SHA256，並傳回前 10 碼（AutoV2）"""
     if not file_path or not os.path.exists(file_path):
         return None
     try:
@@ -39,7 +39,8 @@ class SaveImageWithPrompt:
                 "images": ("IMAGE",),
                 "filename_prefix": ("STRING", {"default": "ComfyUI"}),
                 "wipe_workflow": ("BOOLEAN", {"default": False}),
-                "wipe_lora": ("BOOLEAN", {"default": False}),  # 新增 wipe_lora toggle
+                "wipe_checkpoint": ("BOOLEAN", {"default": False}),
+                "wipe_lora": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "pos_prompt": ("STRING", {"default": ""}),
@@ -64,11 +65,29 @@ class SaveImageWithPrompt:
             )
         return full_path
 
+    def resolve_model_path(self, model_file_name):
+        """尋找 Checkpoint / UNet / Diffusion 模型實體檔案路徑"""
+        if not model_file_name:
+            return None
+        clean_name = str(model_file_name).strip()
+        for folder_type in ["checkpoints", "diffusion_models", "unet"]:
+            full_path = folder_paths.get_full_path(folder_type, clean_name)
+            if full_path:
+                return full_path
+            if not clean_name.endswith(".safetensors"):
+                full_path = folder_paths.get_full_path(
+                    folder_type, clean_name + ".safetensors"
+                )
+                if full_path:
+                    return full_path
+        return None
+
     def save_images(
         self,
         images,
         filename_prefix="ComfyUI",
         wipe_workflow=False,
+        wipe_checkpoint=False,
         wipe_lora=False,
         pos_prompt="",
         prompt=None,
@@ -86,6 +105,7 @@ class SaveImageWithPrompt:
 
         lora_hashes_dict = {}
         model_name = ""
+        model_hash = ""
         fallback_pos_prompt = ""
 
         if prompt is not None:
@@ -93,17 +113,36 @@ class SaveImageWithPrompt:
                 class_type = str(node_data.get("class_type", ""))
                 inputs = node_data.get("inputs", {})
 
-                # 1. 抓取 Checkpoint 底模名稱
-                if "CheckpointLoader" in class_type or "ckpt_name" in inputs:
-                    ckpt_path = inputs.get("ckpt_name", "")
-                    if ckpt_path:
-                        model_name = os.path.splitext(
-                            os.path.basename(str(ckpt_path))
-                        )[0]
+                # 1. 抓取 Checkpoint / Diffusion / UNet 模型名稱並計算 Hash
+                if not wipe_checkpoint and not model_name:
+                    ckpt_keys = ["ckpt_name", "model_name", "unet_name", "diffusion_model"]
+                    raw_model_path = ""
+                    for key in ckpt_keys:
+                        if key in inputs:
+                            val = inputs.get(key, "")
+                            if val:
+                                raw_model_path = str(val)
+                                model_name = os.path.splitext(os.path.basename(raw_model_path))[0]
+                                break
 
-                # 僅在 wipe_lora 為 False 時才執行 LoRA 搜尋與 Hash 計算
+                    if not model_name and any(
+                        k in class_type for k in ["CheckpointLoader", "UNETLoader", "DiffusionModel"]
+                    ):
+                        for key, val in inputs.items():
+                            if isinstance(val, str) and any(
+                                val.endswith(ext) for ext in [".safetensors", ".ckpt", ".pth", ".bin"]
+                            ):
+                                raw_model_path = val
+                                model_name = os.path.splitext(os.path.basename(val))[0]
+                                break
+
+                    if raw_model_path:
+                        full_model_path = self.resolve_model_path(raw_model_path)
+                        if full_model_path:
+                            model_hash = calculate_model_autov2(full_model_path) or ""
+
+                # 2. 僅在 wipe_lora 為 False 時才執行 LoRA 搜尋與 Hash 計算
                 if not wipe_lora:
-                    # 2. 處理 AnimaMultiLoraLoader 節點
                     if class_type == "AnimaMultiLoraLoader":
                         lora_data = inputs.get("lora_list_json", "")
                         lora_list = []
@@ -128,20 +167,17 @@ class SaveImageWithPrompt:
                                 except Exception:
                                     continue
 
-                            if isinstance(item, dict) and item.get(
-                                "enabled", False
-                            ):
+                            if isinstance(item, dict) and item.get("enabled", False):
                                 raw_name = item.get("name", "")
                                 if raw_name:
                                     lora_path = self.resolve_lora_path(raw_name)
-                                    hash_val = calculate_lora_autov2(lora_path)
+                                    hash_val = calculate_model_autov2(lora_path)
                                     if hash_val:
                                         clean_name = os.path.splitext(
                                             os.path.basename(raw_name)
                                         )[0]
                                         lora_hashes_dict[clean_name] = hash_val
 
-                    # 3. 處理 Power Lora Loader (rgthree) 節點
                     if (
                         class_type == "Power Lora Loader (rgthree)"
                         or "PowerLoraLoader" in class_type
@@ -151,14 +187,14 @@ class SaveImageWithPrompt:
                                 raw_name = val.get("lora", "")
                                 if raw_name:
                                     lora_path = self.resolve_lora_path(raw_name)
-                                    hash_val = calculate_lora_autov2(lora_path)
+                                    hash_val = calculate_model_autov2(lora_path)
                                     if hash_val:
                                         clean_name = os.path.splitext(
                                             os.path.basename(raw_name)
                                         )[0]
                                         lora_hashes_dict[clean_name] = hash_val
 
-                # 4. 若 pos_prompt 為空，從 AnimaPromptPlus 擷取標籤作為備用
+                # 3. 若 pos_prompt 為空，從 AnimaPromptPlus 擷取標籤作為備用
                 if not pos_prompt.strip() and class_type == "AnimaPromptPlus":
                     tags_keys = [
                         "quality_prompt",
@@ -179,7 +215,6 @@ class SaveImageWithPrompt:
                         sep = inputs.get("separator", ", ")
                         fallback_pos_prompt = sep.join(extracted_tags)
 
-        # 決定最終使用的 Positive Prompt
         final_pos_prompt = (
             pos_prompt.strip() if pos_prompt.strip() else fallback_pos_prompt
         )
@@ -256,7 +291,10 @@ class SaveImageWithPrompt:
                 f"Size: {width}x{height}",
             ]
 
-            if model_name:
+            if not wipe_checkpoint and model_hash:
+                param_parts.append(f"Model hash: {model_hash}")
+
+            if not wipe_checkpoint and model_name:
                 param_parts.append(f"Model: {model_name}")
 
             if not wipe_lora and lora_hashes_dict:
@@ -273,13 +311,9 @@ class SaveImageWithPrompt:
                 f"{', '.join(param_parts)}"
             )
 
-            # 寫入 Civitai 格式及自訂提示詞
             metadata.add_text("parameters", civitai_format_prompt)
             metadata.add_text("positive_prompt", final_pos_prompt)
 
-            # -----------------------------------------------------------
-            # 控制 ComfyUI 工作流寫入 logic
-            # -----------------------------------------------------------
             if not wipe_workflow:
                 if prompt is not None:
                     metadata.add_text("prompt", json.dumps(prompt))
@@ -287,7 +321,6 @@ class SaveImageWithPrompt:
                     for x in extra_pnginfo:
                         metadata.add_text(x, json.dumps(extra_pnginfo[x]))
             else:
-                # 若啟動 wipe_workflow，剔除 workflow 但保留 extra_pnginfo 的其餘欄位 (若有的話)
                 if extra_pnginfo is not None:
                     for x in extra_pnginfo:
                         if x != "workflow":
