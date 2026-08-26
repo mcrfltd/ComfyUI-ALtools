@@ -1,8 +1,8 @@
 import os
+import json
 import torch
 import numpy as np
 from PIL import Image, ImageOps
-import json
 
 class ImageFolderLoaderWithMetadata:
     @classmethod
@@ -10,16 +10,15 @@ class ImageFolderLoaderWithMetadata:
         return {
             "required": {
                 "directory_path": ("STRING", {"default": ""}),
-                # 將 control_after_generate 綁定到 index 欄位上
                 "index": ("INT", {"default": 0, "min": 0, "max": 9999999, "step": 1, "control_after_generate": True}),
                 "sort_by": (["name_ascending", "name_descending", "date_newest", "date_oldest"], {"default": "name_ascending"}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "STRING", "INT")
-    RETURN_NAMES = ("image", "mask", "pos_prompt", "neg_prompt", "current_index")
+    # 新增 STRING 型態的 file_path 輸出
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "STRING", "INT", "STRING")
+    RETURN_NAMES = ("image", "mask", "pos_prompt", "neg_prompt", "current_index", "file_path")
     FUNCTION = "load_image"
-    # CATEGORY = "image"
     CATEGORY = "ALTOOLS"
 
     OUTPUT_NODE = True
@@ -48,6 +47,9 @@ class ImageFolderLoaderWithMetadata:
         # 防止索引溢出 (循環讀取)
         actual_index = index % len(files)
         image_path = files[actual_index]
+
+        # 轉為絕對路徑
+        abs_file_path = os.path.abspath(image_path)
 
         # 2. 讀取圖片與處理 Mask
         img = Image.open(image_path)
@@ -82,7 +84,7 @@ class ImageFolderLoaderWithMetadata:
             "ui": {
                 "images": [self.get_preview_dict(image_path)]
             },
-            "result": (image, mask, pos_prompt, neg_prompt, index),
+            "result": (image, mask, pos_prompt, neg_prompt, index, abs_file_path),
         }
 
     def parse_a1111(self, params_text):
